@@ -37,6 +37,12 @@ def adjust_brightness_contrast(image, brightness=180, contrast_factor=1.15):
 	
 	return np.asarray(adjusted_img_32, dtype="uint8")
 
+def get_lightness(image):
+	lab_img = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+	l = cv2.split(lab_img)[0]
+	
+	return int(l.mean())
+	
 def CLAHE_adjust(image):
 	# Actually improves contrast more than adjusting lightness
 	lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
@@ -72,6 +78,21 @@ def is_blurry(image, threshold=200):
 def get_blurriness(image):
 	return cv2.Laplacian(image, cv2.CV_64F).var()
 
+def write_text(image, text, fontColor=(255,255,255)):
+	font                   = cv2.FONT_HERSHEY_SIMPLEX
+	bottomLeftCornerOfText = (10,image.shape[1]-20)
+	fontScale              = 1
+	lineType               = 2
+	
+	new_image = image.copy()
+	cv2.putText(new_image, text, 
+		bottomLeftCornerOfText, 
+		font, 
+		fontScale,
+		fontColor,
+		lineType)
+	
+	return new_image
 
 
 ### Edge Detection Algorithms ###
@@ -159,10 +180,16 @@ def PST(I,LPF=0.21,Phase_strength=0.48,Warp_strength=12.14, Threshold_min=-1, Th
 		Overlay = mh.overlay(I, out)
 		return (out, Overlay)
 
-def adaptive_threshold_mean(image):
-	image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-	threshold_img = cv2.adaptiveThreshold(image,255,cv2.ADAPTIVE_THRESH_MEAN_C,\
-		cv2.THRESH_BINARY_INV,13,2)
+def adaptive_threshold_mean(image, inverse = True):
+	if len(image.shape) > 2:
+		image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+	
+	if inverse:
+		mode = cv2.THRESH_BINARY_INV
+	else:
+		mode = cv2.THRESH_BINARY
+		
+	threshold_img = cv2.adaptiveThreshold(image,255,cv2.ADAPTIVE_THRESH_MEAN_C,mode,13,2)
 	#cv2.imshow('threshold_img1', threshold_img)
 	
 	return threshold_img
@@ -175,7 +202,12 @@ def adaptive_threshold_gaussian(image):
 	return threshold_img
 '''
 
-def opening(image, kernel_size=3):
+def erode(image, kernel_size=3):
+	kernel = np.ones((kernel_size,kernel_size),np.uint8)
+	eroded = cv2.erode(image,kernel,iterations = 1)
+	return eroded
+
+def morph_open(image, kernel_size=3):
 	# closing should be performed after cv2.THRESH_BINARY_INV
 	# kernel_size of 2 and 3 are acceptable
 	# 2 is more detail and more noise
@@ -184,7 +216,7 @@ def opening(image, kernel_size=3):
 	opening = cv2.morphologyEx(image, cv2.MORPH_OPEN, kernel)
 	return opening
 
-def closing(image, kernel_size=3):
+def morph_close(image, kernel_size=3):
 	# closing should be performed after cv2.THRESH_BINARY
 	# kernel_size of 2 and 3 are acceptable
 	# 2 is more detail and more noise
@@ -194,7 +226,28 @@ def closing(image, kernel_size=3):
 	return closing
 
 def hough_circle_detection(image):
-	pass
+	# detect circles in the image
+	gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+	circles = cv2.HoughCircles(gray, cv2.CV_HOUGH_GRADIENT, 1.2, 100)
+	output = image.copy()
+	
+	# ensure at least some circles were found
+	if circles is not None:
+		# convert the (x, y) coordinates and radius of the circles to integers
+		circles = np.round(circles[0, :]).astype("int")
+
+		# loop over the (x, y) coordinates and radius of the circles
+		for (x, y, r) in circles:
+			# draw the circle in the output image, then draw a rectangle
+			# corresponding to the center of the circle
+			cv2.circle(output, (x, y), r, (0, 255, 0), 4)
+			#cv2.rectangle(output, (x - 5, y - 5), (x + 5, y + 5), (0, 128, 255), -1)
+
+		# show the output image
+		cv2.imshow("output", np.hstack([image, output]))
+		return output
+	else:
+		return None
 
 
 ############################## Procedural Functions  ##############################
@@ -240,15 +293,75 @@ def print_usage():
 def detect_edges(image):
 	return detect_edges_canny(image)
 
+def order_points(pts):
+	# initialzie a list of coordinates that will be ordered
+	# such that the first entry in the list is the top-left,
+	# the second entry is the top-right, the third is the
+	# bottom-right, and the fourth is the bottom-left
+	rect = np.zeros((4, 2), dtype = "float32")
+ 
+	# the top-left point will have the smallest sum, whereas
+	# the bottom-right point will have the largest sum
+	s = pts.sum(axis = 1)
+	rect[0] = pts[np.argmin(s)]
+	rect[2] = pts[np.argmax(s)]
+ 
+	# now, compute the difference between the points, the
+	# top-right point will have the smallest difference,
+	# whereas the bottom-left will have the largest difference
+	diff = np.diff(pts, axis = 1)
+	rect[1] = pts[np.argmin(diff)]
+	rect[3] = pts[np.argmax(diff)]
+ 
+	# return the ordered coordinates
+	return rect
+
+def four_point_transform(image, pts):
+	# obtain a consistent order of the points and unpack them
+	# individually
+	rect = order_points(pts)
+	(tl, tr, br, bl) = rect
+ 
+	# compute the width of the new image, which will be the
+	# maximum distance between bottom-right and bottom-left
+	# x-coordiates or the top-right and top-left x-coordinates
+	widthA = np.sqrt(((br[0] - bl[0]) ** 2) + ((br[1] - bl[1]) ** 2))
+	widthB = np.sqrt(((tr[0] - tl[0]) ** 2) + ((tr[1] - tl[1]) ** 2))
+	maxWidth = max(int(widthA), int(widthB))
+ 
+	# compute the height of the new image, which will be the
+	# maximum distance between the top-right and bottom-right
+	# y-coordinates or the top-left and bottom-left y-coordinates
+	heightA = np.sqrt(((tr[0] - br[0]) ** 2) + ((tr[1] - br[1]) ** 2))
+	heightB = np.sqrt(((tl[0] - bl[0]) ** 2) + ((tl[1] - bl[1]) ** 2))
+	maxHeight = max(int(heightA), int(heightB))
+ 
+	# now that we have the dimensions of the new image, construct
+	# the set of destination points to obtain a "birds eye view",
+	# (i.e. top-down view) of the image, again specifying points
+	# in the top-left, top-right, bottom-right, and bottom-left
+	# order
+	dst = np.array([
+		[0, 0],
+		[maxWidth - 1, 0],
+		[maxWidth - 1, maxHeight - 1],
+		[0, maxHeight - 1]], dtype = "float32")
+ 
+	# compute the perspective transform matrix and then apply it
+	M = cv2.getPerspectiveTransform(rect, dst)
+	warped = cv2.warpPerspective(image, M, (maxWidth, maxHeight))
+ 
+	# return the warped image
+	return warped
 
 ############################## Main Routine ##############################
 
 # index : [0-5], length = 6
-test_img_file_names = ['HIV_Negative_Android_3162017.jpg', 'HIV_Positive_0516_Residue.JPG',
+TestPhotos_HIV1_file_names = ['HIV_Negative_Android_3162017.jpg', 'HIV_Positive_0516_Residue.JPG',
 					   'HIV_Positive_0516.JPG', 'HIV_Positive_Sample.jpg', 'PSF8_square.jpg',
 					   'PSF9_square.jpg']
 # index : [0-10], length = 11
-test_img_file_names2 = ['IMG_20180406_135708.jpg', 'IMG_20180406_135715.jpg',
+OnePlusOne_folder_file_names = ['IMG_20180406_135708.jpg', 'IMG_20180406_135715.jpg',
 					   'IMG_20180406_135830.jpg', 'IMG_20180406_140915.jpg', 'IMG_20180406_140916.jpg',
 					   'IMG_20180406_140928.jpg', 'IMG_20180406_140933.jpg', 'IMG_20180406_142924.jpg',
 					   'IMG_20180406_142932.jpg', 'IMG_20180406_144902.jpg', 'IMG_20180406_144906.jpg']
@@ -261,8 +374,8 @@ if __name__ == "__main__":
 	if len(sys.argv) < 2 or len(sys.argv) > 3:
 		if isDebugging:
 			isVideo = False
-			img_name = 'TestPhotos_HIV1/'+test_img_file_names[5]
-			#img_name = 'TestPhotos_OnePlusOne/'+test_img_file_names2[0]
+			img_name = 'TestPhotos_HIV1/'+TestPhotos_HIV1_file_names[5] # 3,4,5 contour incorrect detection
+			#img_name = 'TestPhotos_OnePlusOne/'+OnePlusOne_folder_file_names[0]
 		else:
 			print_usage_and_quit()
 	elif sys.argv[1].lower() in ["-v", "--video"]:
@@ -303,7 +416,7 @@ if __name__ == "__main__":
 				
 				threshold_frame = adaptive_threshold_mean(resized_frame)
 				#cv2.imshow('threshold_frame', threshold_frame)
-				opened_frame = opening(threshold_frame)
+				opened_frame = morph_open(threshold_frame)
 				cv2.imshow('opened_frame', opened_frame)
 				
 				if cv2.waitKey(30) >= 0:
@@ -317,34 +430,123 @@ if __name__ == "__main__":
 	else:
 		
 		img = read_n_resize(img_name)
-		cv2.imshow('img', img)
-	
-		pst_img = PST(img)[1]
-		cv2.imshow('PSTd_IMG', pst_img)
+		#cv2.imshow('img', img)
+		
+		#pst_mask, pst_img = PST(img)
+		#cv2.imshow('PSTd_mask', pst_mask*255.0)
 		
 		#img = preprocess(img)
 		#cv2.imshow('img_preprocessed', img)
 		
-		threshold_img = adaptive_threshold_mean(img)
+		threshold_mask = adaptive_threshold_mean(img)
 		#cv2.imshow('threshold_img', threshold_img)
-		opened_img = opening(threshold_img)
-		cv2.imshow('opening', opened_img)
+		opened_mask = morph_open(threshold_mask)
+		cv2.imshow('opened_mask', opened_mask)
+		cv2.imshow('overlayed', mh.overlay(img.mean(axis=2), opened_mask))
 		
-		#edge, overlayed_img = PST(img)
-		#cv2.imshow('PST_EDGE', np.reshape(np.repeat(edge*255.0,3), edge.shape+(3,)))
-		#cv2.imshow('PSTd_IMG', overlayed_img)
+		uped = cv2.pyrUp(opened_mask)
+		#cv2.imshow('uped', uped)
+		blurred = uped
+		for _ in range(15):
+			blurred = cv2.medianBlur(blurred, 15)
+		#cv2.imshow('blurred1', blurred)
+		blurred = (blurred > 30)*255.0
+		#cv2.imshow('blurred2', blurred)
+		opened_sm = cv2.pyrDown(blurred)
+		opened_sm = cv2.threshold(opened_sm,127,255,cv2.THRESH_BINARY)[1]
+		cv2.imshow('open_sm', opened_sm)
 		
-		# Detect edges
-		#gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-		#cv2.imshow("Edged", detect_edges(gray))
-		#detect_edges(gray)
+		edged = opened_sm.astype("uint8")
+		image = img.copy()
+		
+		_, cnts, hrchy = cv2.findContours(edged.copy(), cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+		hrchy = hrchy[0]
+		i=0
+		while i < len(cnts):
+			if hrchy[i][3] < 0:
+				#cnts.pop(i)
+				np.delete(hrchy, i, 0)
+			i += 1
+		#print(len(cnts))
+		cnts = sorted(cnts, key = cv2.contourArea, reverse = True)[:5]
+		
+		# find the contours in the edged image, keeping only the
+		# largest ones, and initialize the screen contour
+		boxCnts = []
+		approx = 0
+		n=-1
+		#print()
+		# loop over the contours
+		for c in cnts:
+			n+=1
+			#print(n)
+			#if n == 0: continue
+			ct_img = img.copy()
+			# show the contour (outline) of the piece of paper
+			cv2.drawContours(ct_img, [c], -1, (0, 255, 0), 2)
+			cv2.imshow("ct_img", ct_img)
+			
+			# approximate the contour
+			peri = cv2.arcLength(c, True)
+			approx = cv2.approxPolyDP(c, 0.02 * peri, True)
+			print(len(approx))
+			cv2.waitKey(0)
+			
+			# if our approximated contour has four points, then we
+			# can assume that we have found our screen
+			if len(approx) == 4:
+				#print("matched")
+				rect = cv2.minAreaRect(c) # returns (center, (width, height), rotation angle)
+				#print(rect[1])
+				#print(rect[1][0]/rect[1][1])
+				boxCnt = cv2.boxPoints(rect).astype(approx.dtype)
+				#print(boxCnt)
+				
+				# Below returns distance between corresponding pts of
+				#	 a = boxCntBiggestSqr, b = boxCntBiggestRect
+				# dist = [int(((a[i][0]-b[i][0])**2+(a[i][1]-b[i][1])**2)**0.5) for i in range(len(a))]
+				# 	-> [9, 54, 54, 9]
+				# 	if we can extract index, then we get orientation.
+				
+				boxCnt = np.reshape(boxCnt, approx.shape)
+				boxCnts.append(boxCnt)
+				break
+		
+		if len(boxCnts) <= 0:
+			print("Rectangle not found!")
+			sys.exit(1)
+		
+		# show the contour (outline) of the piece of paper
+		cv2.drawContours(image, [boxCnt], -1, (0, 255, 0), 2)
+		cv2.imshow("Outline", image)
+		'''
+		cnt_img2 = img.copy()
+		cv2.drawContours(cnt_img2, [approx], -1, (0, 255, 0), 2)
+		cv2.imshow("Outline2", cnt_img2)
+		'''
+		cv2.waitKey(0)
+		# apply the four point transform to obtain a top-down
+		# view of the original image
+		warped = four_point_transform(img, boxCnt.reshape(4, 2))
+		
+		'''
+		# convert the warped image to grayscale, then threshold it
+		# to give it that 'black and white' paper effect
+		warped = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+		T = adaptive_threshold_mean(warped, False)
+		warped = (warped > T).astype("uint8") * 255
+		'''
+		
+		# show the original and scanned images
+		#cv2.imshow("Original", img)
+		cv2.imshow("Scanned", warped)
+		print("Lightness of {}: {}".format(img_name, get_lightness(warped)))
 		
 		cv2.waitKey(0)
 		#res = np.hstack((img,equ)) #stacking images side-by-side
 		#cv2.imwrite('res.png',res)
 
 # End Main Routine
-
 
 
 #################### Code below saved for potential future use. ####################
