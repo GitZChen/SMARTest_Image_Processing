@@ -227,8 +227,11 @@ def morph_close(image, kernel_size=3):
 
 def hough_circle_detection(image):
 	# detect circles in the image
-	gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-	circles = cv2.HoughCircles(gray, cv2.CV_HOUGH_GRADIENT, 1.2, 100)
+	if len(image.shape) > 2:
+		gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+	else:
+		gray = image
+	circles = cv2.HoughCircles(gray, cv2.HOUGH_GRADIENT, 1.2, 100)
 	output = image.copy()
 	
 	# ensure at least some circles were found
@@ -275,7 +278,7 @@ def preprocess(image):
 	image = adjust_gamma(image)
 	#cv2.imshow('after_gamma', image)
 	
-	image = adjust_contrast(image, 1.25)
+	#image = adjust_contrast(image, 1.25)
 	#cv2.imshow('after_contrast', image)
 	
 	#image = CLAHE_adjust(image)
@@ -289,6 +292,81 @@ def print_usage_and_quit():
 
 def print_usage():
 	print("Usage: python hivImageProcessing.py [-i]/[--image]/[-v]/[--video] [FILENAME]")
+
+def detect_smallest_circle(thresholded_image):
+	
+	# Set up the detector with appropriate parameters for circle detection.
+	circle_detector_params = cv2.SimpleBlobDetector_Params()
+	
+	circle_detector_params.filterByArea = True
+	circle_detector_params.minArea = 200 		# 800
+	circle_detector_params.maxArea = 7000		# 7000
+	
+	circle_detector_params.filterByCircularity = True
+	circle_detector_params.minCircularity = 0.5
+	
+	circle_detector_params.filterByInertia = True
+	circle_detector_params.minInertiaRatio = 0.5
+	
+	return detect_blob(thresholded_image, circle_detector_params)
+
+def euclidean_dist(pt_a, pt_b):
+	return np.linalg.norm(np.array(pt_a) - np.array(pt_b))
+
+def detect_dot(thresholded_image, center = None, radius = None):
+
+	# Inverse image b/c SimpleBlobDetector only detects black areas
+	thresholded_image = thresholded_image==0
+	
+	# Set up the detector with appropriate parameters for dot detection.
+	dot_detector_params = cv2.SimpleBlobDetector_Params()
+	
+	dot_detector_params.filterByArea = True
+	dot_detector_params.minArea = 20
+	dot_detector_params.maxArea = 400
+	
+	dot_detector_params.filterByCircularity = True
+	dot_detector_params.minCircularity = 0.5
+	
+	dot_detector_params.filterByInertia = True
+	dot_detector_params.minInertiaRatio = 0.5
+	
+	dots = detect_blob(thresholded_image, dot_detector_params)
+	
+	if center == None or radius == None:
+		return dots
+	#print("radius: {}".format(radius))
+	if radius < 20:
+		radius = 20
+	
+	filtered_dots = []
+	
+	for dot in dots:
+		#print("dist: {}".format(euclidean_dist(dot.pt, center)))
+		if euclidean_dist(dot.pt, center) <= radius:
+			filtered_dots.append(dot)
+	
+	return filtered_dots
+	
+def detect_blob(thresholded_image, blob_detector_params):
+	
+	if thresholded_image.mean() <= 1:
+		thresholded_image = thresholded_image * 255
+	
+	if not thresholded_image.dtype == 'uint8':
+		thresholded_image = thresholded_image.astype('uint8')
+	
+	# Set up the detector with given parameters.
+	detector = cv2.SimpleBlobDetector_create(blob_detector_params)
+	
+	# Detect blobs.
+	keypoints = detector.detect(thresholded_image)
+	
+	return keypoints
+
+def draw_keypoints(keypoints, image):
+	# cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS ensures the size of the circle corresponds to the size of blob
+	return cv2.drawKeypoints(image, keypoints, np.array([]), (0,0,255), cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
 
 def detect_edges(image):
 	return detect_edges_canny(image)
@@ -356,6 +434,141 @@ def four_point_transform(image, pts):
 
 ############################## Main Routine ##############################
 
+def process(img):
+	
+	#pst_mask, pst_img = PST(img)
+	#cv2.imshow('PSTd_mask', pst_mask*255.0)
+	
+	#img = preprocess(img)
+	#cv2.imshow('img_preprocessed', img)
+	
+	threshold_mask = adaptive_threshold_mean(img)
+	#cv2.imshow('threshold_mask', threshold_mask)
+	opened_mask = morph_open(threshold_mask)
+	#cv2.imshow('opened_mask', opened_mask)
+	#cv2.imshow('overlayed', mh.overlay(img.mean(axis=2), opened_mask))
+	
+	uped = cv2.pyrUp(opened_mask)
+	#cv2.imshow('uped', uped)
+	blurred = uped
+	for _ in range(15):
+		blurred = cv2.medianBlur(blurred, 15)
+	#cv2.imshow('blurred1', blurred)
+	blurred = (blurred > 30)*255.0
+	#cv2.imshow('blurred2', blurred)
+	opened_sm = cv2.pyrDown(blurred)
+	opened_sm = cv2.threshold(opened_sm,127,255,cv2.THRESH_BINARY)[1]
+	cv2.imshow('open_sm', opened_sm)
+	
+	circles_detected = detect_smallest_circle(opened_sm)
+	
+	if len(circles_detected) < 1:
+		circles_detected = detect_smallest_circle(opened_mask)
+		if len(circles_detected) < 1:
+			#print("Failed to detect circle!")
+			return img
+	
+	img_with_circle = draw_keypoints(circles_detected, opened_mask)
+	
+	dots_detected = detect_dot(opened_mask, circles_detected[0].pt, circles_detected[0].size/2)
+	
+	img_with_dots = draw_keypoints(dots_detected, opened_mask)
+	
+	# Show keypoints
+	cv2.imshow("img_with_circle", img_with_circle)
+	cv2.imshow("img_with_dots", img_with_dots)
+	
+	cv2.waitKey(0)
+	
+	return img_with_dots
+	
+	'''
+	edged = opened_mask.astype("uint8")#opened_sm.astype("uint8")
+	image = img.copy()
+	
+	_, cnts, hrchy = cv2.findContours(edged.copy(), cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+	hrchy = hrchy[0]
+	i=0
+	while i < len(cnts):
+		if hrchy[i][3] < 0:
+			#cnts.pop(i)
+			np.delete(hrchy, i, 0)
+		i += 1
+	print(len(cnts))
+	cnts = sorted(cnts, key = cv2.contourArea, reverse = True)[:5]
+	
+	# find the contours in the edged image, keeping only the
+	# largest ones, and initialize the screen contour
+	boxCnts = []
+	approx = 0
+	n=-1
+	#print()
+	# loop over the contours
+	for c in cnts:
+		n+=1
+		#print(n)
+		#if n == 0: continue
+		ct_img = img.copy()
+		# show the contour (outline) of the piece of paper
+		cv2.drawContours(ct_img, [c], -1, (0, 255, 0), 2)
+		cv2.imshow("ct_img", ct_img)
+		
+		# approximate the contour
+		peri = cv2.arcLength(c, True)
+		approx = cv2.approxPolyDP(c, 0.02 * peri, True)
+		print(len(approx))
+		cv2.waitKey(0)
+		
+		# if our approximated contour has four points, then we
+		# can assume that we have found our screen
+		if len(approx) == 4:
+			print("matched")
+			rect = cv2.minAreaRect(c) # returns (center, (width, height), rotation angle)
+			#print(rect[1])
+			#print(rect[1][0]/rect[1][1])
+			boxCnt = cv2.boxPoints(rect).astype(approx.dtype)
+			#print(boxCnt)
+			
+			# Below returns distance between corresponding pts of
+			#	 a = boxCntBiggestSqr, b = boxCntBiggestRect
+			# dist = [int(((a[i][0]-b[i][0])**2+(a[i][1]-b[i][1])**2)**0.5) for i in range(len(a))]
+			# 	-> [9, 54, 54, 9]
+			# 	if we can extract index, then we get orientation.
+			
+			boxCnt = np.reshape(boxCnt, approx.shape)
+			boxCnts.append(boxCnt)
+			#break
+	
+	if len(boxCnts) <= 0:
+		print("Rectangle not found!")
+		sys.exit(1)
+	
+	# show the contour (outline) of the piece of paper
+	cv2.drawContours(image, [boxCnt], -1, (0, 255, 0), 2)
+	cv2.imshow("Outline", image)
+	
+	
+	
+	#cnt_img2 = img.copy()
+	#cv2.drawContours(cnt_img2, [approx], -1, (0, 255, 0), 2)
+	#cv2.imshow("Outline2", cnt_img2)
+	
+	cv2.waitKey(0)
+	# apply the four point transform to obtain a top-down
+	# view of the original image
+	warped = four_point_transform(img, boxCnt.reshape(4, 2))
+	
+	
+	# show the original and scanned images
+	#cv2.imshow("Original", img)
+	cv2.imshow("Scanned", warped)
+	print("Lightness of {}: {}".format(img_name, get_lightness(warped)))
+	
+	cv2.waitKey(0)
+	#res = np.hstack((img,equ)) #stacking images side-by-side
+	#cv2.imwrite('res.png',res)
+	'''
+
 # index : [0-5], length = 6
 TestPhotos_HIV1_file_names = ['HIV_Negative_Android_3162017.jpg', 'HIV_Positive_0516_Residue.JPG',
 					   'HIV_Positive_0516.JPG', 'HIV_Positive_Sample.jpg', 'PSF8_square.jpg',
@@ -374,8 +587,19 @@ if __name__ == "__main__":
 	if len(sys.argv) < 2 or len(sys.argv) > 3:
 		if isDebugging:
 			isVideo = False
-			img_name = 'TestPhotos_HIV1/'+TestPhotos_HIV1_file_names[5] # 3,4,5 contour incorrect detection
+			print("Testing...")
+			for i in range(11):
+				print("Currently on Image {}".format(i+1))
+				#photo_name = TestPhotos_HIV1_file_names[i] # 3,4,5 contour incorrect detection
+				#img_path = 'TestPhotos_HIV1/' + photo_name
+				photo_name = OnePlusOne_folder_file_names[i] # 3,4,5 contour incorrect detection
+				img_path = 'TestPhotos_OnePlusOne/' + photo_name
+				img = read_n_resize(img_path)
+				cv2.imshow(photo_name, img)
+				process(img)
 			#img_name = 'TestPhotos_OnePlusOne/'+OnePlusOne_folder_file_names[0]
+			print("Testing Completed w/ Success!")
+			sys.exit(0)
 		else:
 			print_usage_and_quit()
 	elif sys.argv[1].lower() in ["-v", "--video"]:
@@ -403,21 +627,12 @@ if __name__ == "__main__":
 			ret, frame = cap.read()
 			if ret == True:
 				resized_frame = resize(frame)
-				cv2.imshow('Frame',resized_frame)
+				#cv2.imshow('Frame',resized_frame)
 				preprocessed_frame = preprocess(resized_frame)
 				cv2.imshow("preprocessed_frame",preprocessed_frame)
 				
-				#PEdge, PFrame = PST(preprocessed_frame)
-				NPEdge, NPFrame = PST(resized_frame)
-				#cv2.imshow('PEdge',PEdge*255.0)
-				cv2.imshow('NPEdge',NPEdge*255.0)
-				#cv2.imshow('PFrame',PFrame)
-				#cv2.imshow('NPFrame',NPFrame)
-				
-				threshold_frame = adaptive_threshold_mean(resized_frame)
-				#cv2.imshow('threshold_frame', threshold_frame)
-				opened_frame = morph_open(threshold_frame)
-				cv2.imshow('opened_frame', opened_frame)
+				frame = process(resized_frame)
+				cv2.imshow("frame",frame)
 				
 				if cv2.waitKey(30) >= 0:
 					break
@@ -428,123 +643,9 @@ if __name__ == "__main__":
 		cv2.destroyAllWindows()
 		
 	else:
+		cv2.imshow('img', img)
+		process(img)
 		
-		img = read_n_resize(img_name)
-		#cv2.imshow('img', img)
-		
-		#pst_mask, pst_img = PST(img)
-		#cv2.imshow('PSTd_mask', pst_mask*255.0)
-		
-		#img = preprocess(img)
-		#cv2.imshow('img_preprocessed', img)
-		
-		threshold_mask = adaptive_threshold_mean(img)
-		#cv2.imshow('threshold_img', threshold_img)
-		opened_mask = morph_open(threshold_mask)
-		cv2.imshow('opened_mask', opened_mask)
-		cv2.imshow('overlayed', mh.overlay(img.mean(axis=2), opened_mask))
-		
-		uped = cv2.pyrUp(opened_mask)
-		#cv2.imshow('uped', uped)
-		blurred = uped
-		for _ in range(15):
-			blurred = cv2.medianBlur(blurred, 15)
-		#cv2.imshow('blurred1', blurred)
-		blurred = (blurred > 30)*255.0
-		#cv2.imshow('blurred2', blurred)
-		opened_sm = cv2.pyrDown(blurred)
-		opened_sm = cv2.threshold(opened_sm,127,255,cv2.THRESH_BINARY)[1]
-		cv2.imshow('open_sm', opened_sm)
-		
-		edged = opened_sm.astype("uint8")
-		image = img.copy()
-		
-		_, cnts, hrchy = cv2.findContours(edged.copy(), cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-		hrchy = hrchy[0]
-		i=0
-		while i < len(cnts):
-			if hrchy[i][3] < 0:
-				#cnts.pop(i)
-				np.delete(hrchy, i, 0)
-			i += 1
-		#print(len(cnts))
-		cnts = sorted(cnts, key = cv2.contourArea, reverse = True)[:5]
-		
-		# find the contours in the edged image, keeping only the
-		# largest ones, and initialize the screen contour
-		boxCnts = []
-		approx = 0
-		n=-1
-		#print()
-		# loop over the contours
-		for c in cnts:
-			n+=1
-			#print(n)
-			#if n == 0: continue
-			ct_img = img.copy()
-			# show the contour (outline) of the piece of paper
-			cv2.drawContours(ct_img, [c], -1, (0, 255, 0), 2)
-			cv2.imshow("ct_img", ct_img)
-			
-			# approximate the contour
-			peri = cv2.arcLength(c, True)
-			approx = cv2.approxPolyDP(c, 0.02 * peri, True)
-			print(len(approx))
-			cv2.waitKey(0)
-			
-			# if our approximated contour has four points, then we
-			# can assume that we have found our screen
-			if len(approx) == 4:
-				#print("matched")
-				rect = cv2.minAreaRect(c) # returns (center, (width, height), rotation angle)
-				#print(rect[1])
-				#print(rect[1][0]/rect[1][1])
-				boxCnt = cv2.boxPoints(rect).astype(approx.dtype)
-				#print(boxCnt)
-				
-				# Below returns distance between corresponding pts of
-				#	 a = boxCntBiggestSqr, b = boxCntBiggestRect
-				# dist = [int(((a[i][0]-b[i][0])**2+(a[i][1]-b[i][1])**2)**0.5) for i in range(len(a))]
-				# 	-> [9, 54, 54, 9]
-				# 	if we can extract index, then we get orientation.
-				
-				boxCnt = np.reshape(boxCnt, approx.shape)
-				boxCnts.append(boxCnt)
-				break
-		
-		if len(boxCnts) <= 0:
-			print("Rectangle not found!")
-			sys.exit(1)
-		
-		# show the contour (outline) of the piece of paper
-		cv2.drawContours(image, [boxCnt], -1, (0, 255, 0), 2)
-		cv2.imshow("Outline", image)
-		'''
-		cnt_img2 = img.copy()
-		cv2.drawContours(cnt_img2, [approx], -1, (0, 255, 0), 2)
-		cv2.imshow("Outline2", cnt_img2)
-		'''
-		cv2.waitKey(0)
-		# apply the four point transform to obtain a top-down
-		# view of the original image
-		warped = four_point_transform(img, boxCnt.reshape(4, 2))
-		
-		'''
-		# convert the warped image to grayscale, then threshold it
-		# to give it that 'black and white' paper effect
-		warped = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
-		T = adaptive_threshold_mean(warped, False)
-		warped = (warped > T).astype("uint8") * 255
-		'''
-		
-		# show the original and scanned images
-		#cv2.imshow("Original", img)
-		cv2.imshow("Scanned", warped)
-		print("Lightness of {}: {}".format(img_name, get_lightness(warped)))
-		
-		cv2.waitKey(0)
-		#res = np.hstack((img,equ)) #stacking images side-by-side
-		#cv2.imwrite('res.png',res)
 
 # End Main Routine
 
